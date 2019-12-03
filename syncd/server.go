@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/YLonely/sync-util/syncd/task"
+
 	"github.com/YLonely/sync-util/syncd/dockertypes"
 	"github.com/YLonely/sync-util/syncd/ioutils"
 
@@ -39,6 +41,8 @@ type Server struct {
 	supernode                                                      api.SuperNodeAPI
 	lockTimeout                                                    time.Duration
 	nodeID                                                         uint
+	shutdown                                                       chan struct{}
+	properlyClosed                                                 chan struct{}
 }
 
 const (
@@ -51,8 +55,10 @@ const (
 //NewServer init a server instance
 func NewServer(c Config) (*Server, error) {
 	s := &Server{
-		syncDir:     c.SyncDir,
-		lockTimeout: time.Second * 5,
+		syncDir:        c.SyncDir,
+		lockTimeout:    time.Second * 5,
+		shutdown:       make(chan struct{}, 1),
+		properlyClosed: make(chan struct{}, 1),
 	}
 	var err error
 	if len(c.SuperNodeIP) == 0 || len(c.SuperNodePort) == 0 {
@@ -83,11 +89,20 @@ func (s *Server) Start(ctx context.Context) chan error {
 			errorC <- err
 			return
 		}
+		// check and build the remote dir
+		err = s.remoteDirInit(ctx)
+		if err != nil {
+			errorC <- err
+			return
+		}
+		// start the sync loop
 	}()
 	return errorC
 }
 
 func (s *Server) Stop(ctx context.Context) error {
+	s.shutdown <- struct{}{}
+	<-s.properlyClosed
 	return nil
 }
 
@@ -117,11 +132,11 @@ func (s *Server) remoteDirInit(ctx context.Context) error {
 	}
 	if res.needSync {
 		log.Logger.WithField("node-id", s.nodeID).Info("it seems that we should sync the remote dir")
-		resp, err := s.taskRegister(ctx, "", types.DirStructureSync)
+		t, err := s.newRegisteredTask(ctx, "", types.DirStructureSync, nil)
 		if err != nil {
 			return err
 		}
-		if resp == types.RegisterFailed {
+		if t == nil {
 			log.Logger.WithField("node-id", s.nodeID).Info("someone else get the job to sync the remote dir, wait for it")
 			for {
 				time.Sleep(remoteDirCheckRetryInterval)
@@ -132,33 +147,44 @@ func (s *Server) remoteDirInit(ctx context.Context) error {
 				if !res.needSync {
 					break
 				}
-				log.Logger.WithField("node-id", s.nodeID).Debug("again, wait other nodes to sync the remote dir")
+				log.Logger.WithField("node-id", s.nodeID).Debug("again, wait other node to sync the remote dir")
 			}
 			return nil
 		}
 		log.Logger.WithField("node-id", s.nodeID).Info("get the job to sync the remote dir")
-		if !res.layerDBDirExist {
-			err := os.MkdirAll(s.targetLayerDBDir, 0644)
-			if err != nil {
-				return err
+		t.SetJob(func(ctx context.Context) error {
+			if !res.layerDBDirExist {
+				err := os.MkdirAll(s.targetLayerDBDir, 0644)
+				if err != nil {
+					return err
+				}
 			}
-		}
-		if !res.layerDataDirExist {
-			err := os.MkdirAll(s.targetLayerDataDir, 0644)
-			if err != nil {
-				return err
+			if !res.layerDataDirExist {
+				err := os.MkdirAll(s.targetLayerDataDir, 0644)
+				if err != nil {
+					return err
+				}
 			}
-		}
-		if !res.repositoryFileExist {
-			repository := dockertypes.RepositoryStore{}
-			bytes, err := json.Marshal(repository)
-			if err != nil {
-				return err
+			if !res.repositoryFileExist {
+				repository := dockertypes.RepositoryStore{}
+				bytes, err := json.Marshal(repository)
+				if err != nil {
+					return err
+				}
+				ioutils.AtomicWriteFile(s.targetRepositoryFilePath, bytes, 0644)
 			}
-			ioutils.AtomicWriteFile(s.targetRepositoryFilePath, bytes, 0644)
+			return nil
+		})
+		t.Run(ctx)
+		if err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func (s *Server) syncLoop(ctx context.Context) error {
+
 }
 
 type checkResult struct {
@@ -211,17 +237,21 @@ func (s *Server) nodeRegister(ctx context.Context) (uint, error) {
 	return res.NodeID, nil
 }
 
-func (s *Server) taskRegister(ctx context.Context, specifier string, t types.SyncType) (types.RegisterResponseType, error) {
+func (s *Server) newRegisteredTask(ctx context.Context, specifier string, t types.SyncType, job task.JobType) (*task.Task, error) {
 	req := &types.TaskRegisterRequest{
 		NodeID:        s.nodeID,
 		TaskSpecifier: specifier,
 		Type:          t,
 	}
-	res, err := s.supernode.TaskRegister(ctx, req)
+	resp, err := s.supernode.TaskRegister(ctx, req)
 	if err != nil {
-		return types.RegisterFailed, err
+		return nil, err
 	}
-	return res.Result, err
+	if resp.Result == types.RegisterFailed {
+		return nil, nil
+	}
+	res := task.NewTask(specifier, t, job)
+	return res, nil
 }
 
 //lock is a blocking call
