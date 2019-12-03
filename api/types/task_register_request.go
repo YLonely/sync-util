@@ -3,10 +3,10 @@ package types
 type SyncType int
 
 const (
-	//ImageMetaDataSync syncs the image meta-data to remote dir
-	ImageMetaDataSync SyncType = iota
-	//LayerDataSync syncs the layer data to remote dir
-	LayerDataSync
+	//DefaultSync task syncs the image meta data and layer data to remote dir
+	DefaultSync SyncType = iota
+	//DirStructureSync build the dir structure for the remote dir
+	DirStructureSync
 )
 
 //TaskRegisterRequest send by syncd to register a sync tack

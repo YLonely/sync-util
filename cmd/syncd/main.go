@@ -7,11 +7,6 @@ import (
 	"github.com/urfave/cli"
 )
 
-const (
-	defaultImageMetaDataDir  = "/var/lib/docker/image/overlay2"
-	defaultImageLayerDataDir = "/var/lib/docker/overlay2"
-)
-
 func main() {
 	var config syncd.Config
 
@@ -25,25 +20,13 @@ func main() {
 			Name:        "node-ip",
 			Usage:       "Specify the ip of the super node",
 			Destination: &(config.SuperNodeIP),
-			Required:    true,
+			Value:       "",
 		},
 		cli.StringFlag{
 			Name:        "node-port",
 			Usage:       "Specify the port of the super node",
 			Destination: &(config.SuperNodePort),
-			Required:    true,
-		},
-		cli.StringFlag{
-			Name:        "meta-dir",
-			Value:       defaultImageMetaDataDir,
-			Usage:       "Specify the dir path in which the docker's storage driver save the meta data of images",
-			Destination: &(config.ImageMetaDataDir),
-		},
-		cli.StringFlag{
-			Name:        "layer-dir",
-			Value:       defaultImageLayerDataDir,
-			Usage:       "Specify the dir path in which the docker's storage driver save the image layer data",
-			Destination: &(config.ImageLayerDataDir),
+			Value:       "",
 		},
 		cli.StringFlag{
 			Name:        "sync-dir",
