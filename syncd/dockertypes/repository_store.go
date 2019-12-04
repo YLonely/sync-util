@@ -4,13 +4,15 @@ import (
 	digest "github.com/opencontainers/go-digest"
 )
 
+type FlattenRepos map[digest.Digest]struct{}
+
 type RepositoryStore struct {
-	Repositories map[string]respository
+	Repositories map[string]repository
 }
 
-type respository map[string]digest.Digest
+type repository map[string]digest.Digest
 
-func (repo RepositoryStore) GetAllRepos() map[digest.Digest]struct{} {
+func (repo RepositoryStore) GetAllRepos() FlattenRepos {
 	res := map[digest.Digest]struct{}{}
 	for _, content := range repo.Repositories {
 		for _, ImageID := range content {

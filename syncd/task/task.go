@@ -47,3 +47,11 @@ func (t *Task) Run(ctx context.Context) {
 func (t *Task) Result() error {
 	return t.result
 }
+
+func (t Task) Status() TaskStatus {
+	return t.status
+}
+
+func (t Task) Specifier() string {
+	return t.specifier
+}

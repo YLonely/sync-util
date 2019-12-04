@@ -2,6 +2,7 @@ package ioutils
 
 import (
 	"context"
+	"errors"
 	"io"
 	"io/ioutil"
 	"os"
@@ -12,20 +13,18 @@ const (
 	tmpPermissionForDirectory = os.FileMode(0644)
 )
 
-// Copy copies src to dest, doesn't matter if src is a directory or a file
-func Copy(ctx context.Context, src, dest string) error {
-	defer func() {
-		select {
-		case <-ctx.Done():
-			os.RemoveAll(dest)
-		default:
-		}
-	}()
+func AtomicDirCopy(ctx context.Context, src, dest string) error {
 	info, err := os.Lstat(src)
 	if err != nil {
 		return err
 	}
-	return copy(ctx, src, dest, info)
+	newTempDir := filepath.Join(filepath.Dir(dest), ".tmp-"+filepath.Base(dest))
+	err = copy(ctx, src, dest, info)
+	if err != nil {
+		os.RemoveAll(newTempDir)
+		return err
+	}
+	return os.Rename(newTempDir, dest)
 }
 
 // copy dispatches copy-funcs according to the mode.
@@ -94,7 +93,7 @@ func dcopy(ctx context.Context, srcdir, destdir string, info os.FileInfo) error 
 		}
 		select {
 		case <-ctx.Done():
-			return nil
+			return errors.New("context canceled")
 		default:
 		}
 	}

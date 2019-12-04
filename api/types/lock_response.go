@@ -8,5 +8,6 @@ const (
 )
 
 type LockResponse struct {
-	Result LockResponseType `json:"result"`
+	Result     LockResponseType `json:"result"`
+	OccupiedBy uint             `json:"occupied_by"`
 }
