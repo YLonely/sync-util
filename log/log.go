@@ -11,5 +11,5 @@ var Logger = logrus.New()
 
 func init() {
 	Logger.SetOutput(os.Stdout)
-	Logger.SetLevel(logrus.InfoLevel)
+	Logger.SetLevel(logrus.DebugLevel)
 }

@@ -47,6 +47,7 @@ type Server struct {
 	syncDir                                                        string
 	supernode                                                      api.SuperNodeAPI
 	lockTimeout                                                    time.Duration
+	registered                                                     bool
 	nodeID                                                         uint
 	shutdown                                                       chan struct{}
 	//tasks maps a specifier to a task
@@ -54,6 +55,8 @@ type Server struct {
 	//transfer represents a bunch of tasks related to an image
 	//transfers records a bunch of transfers
 	transfers map[digest.Digest][]*task.Task
+
+	succeededTransfers map[digest.Digest]struct{}
 }
 
 const (
@@ -69,11 +72,12 @@ const (
 //NewServer init a server instance
 func NewServer(c Config) (*Server, error) {
 	s := &Server{
-		syncDir:     c.SyncDir,
-		lockTimeout: time.Second * 5,
-		shutdown:    make(chan struct{}, 1),
-		tasks:       map[string]*task.Task{},
-		transfers:   map[digest.Digest][]*task.Task{},
+		syncDir:            c.SyncDir,
+		lockTimeout:        time.Second * 5,
+		shutdown:           make(chan struct{}, 1),
+		tasks:              map[string]*task.Task{},
+		transfers:          map[digest.Digest][]*task.Task{},
+		succeededTransfers: map[digest.Digest]struct{}{},
 	}
 	var err error
 	if len(c.SuperNodeIP) == 0 || len(c.SuperNodePort) == 0 {
@@ -111,28 +115,47 @@ func (s *Server) Start(ctx context.Context) chan error {
 			return
 		}
 		// start the sync loop
+		err = s.syncLoop(ctx)
+		if err != nil {
+			errorC <- err
+			return
+		}
 	}()
 	return errorC
 }
 
 func (s *Server) Stop(ctx context.Context) error {
 	s.shutdown <- struct{}{}
+	//wait all the tasks to exit
+	for {
+		running := false
+		for _, t := range s.tasks {
+			if t.Status() == task.StatusRunning {
+				running = true
+			}
+		}
+		if !running {
+			break
+		}
+	}
+	s.log().Info("syncd server exits")
 	return nil
 }
 
 func (s *Server) registerToSuperNode(ctx context.Context) error {
-	log.Logger.Info("start to register syncd to super node")
+	s.log().Info("start to register syncd to super node")
 	rand.Seed(time.Now().Unix())
 	var lastErr error
 	for i := 0; i < registerRetry; i++ {
 		id, err := s.nodeRegister(ctx)
 		if err != nil {
 			lastErr = err
-			log.Logger.WithError(err).Warn("can not register now, sleep and retry")
+			s.log().WithError(err).Warn("can't register to supernode")
 			time.Sleep(registerRetryInterval + time.Duration(rand.Intn(1000))*time.Millisecond)
 		} else {
 			s.nodeID = id
-			log.Logger.Infof("register succeeded, get node id: %v", s.nodeID)
+			s.registered = true
+			s.log().Info("register succeeded")
 			return nil
 		}
 	}
@@ -145,13 +168,13 @@ func (s *Server) remoteDirInit(ctx context.Context) error {
 		return err
 	}
 	if res.needSync {
-		log.Logger.WithField("node-id", s.nodeID).Info("it seems that we should sync the remote dir")
-		t, err := s.newRegisteredTask(ctx, "", types.DirStructureSync, nil)
+		s.log().Info("it seems that we should sync the remote dir")
+		t, err := s.newRegisteredTask(ctx, "remote-dir-build", types.DirStructureSync, nil)
 		if err != nil {
 			return err
 		}
 		if t == nil {
-			log.Logger.WithField("node-id", s.nodeID).Info("someone else get the job to sync the remote dir, wait for it")
+			s.log().Info("someone else get the job to sync the remote dir, wait for it")
 			for {
 				time.Sleep(remoteDirCheckRetryInterval)
 				res, err = s.remoteDirCheck(ctx)
@@ -161,11 +184,11 @@ func (s *Server) remoteDirInit(ctx context.Context) error {
 				if !res.needSync {
 					break
 				}
-				log.Logger.WithField("node-id", s.nodeID).Debug("again, wait other node to sync the remote dir")
+				s.log().Debug("wait other node to sync the remote dir")
 			}
 			return nil
 		}
-		log.Logger.WithField("node-id", s.nodeID).Info("get the job to sync the remote dir")
+		s.log().Info("get the job to build the remote dir")
 		t.SetJob(func(ctx context.Context) error {
 			if !res.layerDBDirExist {
 				err := os.MkdirAll(s.targetLayerDBDir, 0644)
@@ -222,18 +245,9 @@ func (s *Server) syncLoop(ctx context.Context) error {
 		}
 		return nil
 	}
-	log.Logger.WithField("node-id", s.nodeID).Info("start sync-loop....")
-
+	s.log().Info("start synchronizing...")
+	ticker := time.NewTicker(syncLoopInterval)
 	for {
-		select {
-		case <-s.shutdown:
-			exit = true
-		default:
-		}
-		if exit {
-			break
-		}
-
 		if err := readJSONFile(srcRepositoryFilePath, srcRepository); err != nil {
 			return err
 		}
@@ -241,34 +255,51 @@ func (s *Server) syncLoop(ctx context.Context) error {
 			return err
 		}
 		srcFlattenRepos := srcRepository.GetAllRepos()
-		log.Logger.WithFields(logrus.Fields{
-			"node-id": s.nodeID,
-		}).Debugf("get all repos from src file %v and target file %v", srcFlattenRepos, *targetFlattenRepos)
-
 		diffRepos := calcRepoDiff(srcFlattenRepos, *targetFlattenRepos)
+		if len(diffRepos) == 0 {
+			s.log().Debug("no repos need to be synchronized")
+		} else {
+			repos := make([]string, 0, len(diffRepos))
+			for _, v := range diffRepos {
+				repos = append(repos, v.Encoded()[:10])
+			}
+			s.log().WithField("different-repos", repos).Debug()
+		}
 
 		// start to dispatch tasks
 		for _, repo := range diffRepos {
-			log.Logger.WithField("node-id", s.nodeID).WithField("image-id", repo).Debug("ready to transfer")
-			if _, exists := s.transfers[repo]; exists {
-				log.Logger.WithField("node-id", s.nodeID).WithField("image-id", repo).Debug("transfer already exists, skip this one")
+			if _, exists := s.succeededTransfers[repo]; exists {
+				s.log().WithField("image-id", repo.Encoded()[:10]).Debug("a same transfer already succeeded, skip this one")
 				continue
 			}
-			tasks, err := s.newImageTransferTasks(ctx, repo)
+			if _, exists := s.transfers[repo]; exists {
+				s.log().WithField("image-id", repo.Encoded()[:10]).Debug("a same transfer is running, skip this one")
+				continue
+			}
+			tasks, err := s.newImageTransferTasks(cctx, repo)
 			if err != nil {
 				return err
 			}
 			if len(tasks) == 0 {
-				log.Logger.WithField("node-id", s.nodeID).WithField("image-id", repo.String()).Warn("image has zero task to run")
+				s.log().WithField("image-id", repo.Encoded()[:10]).Warn("wait for others to transfer this image")
+				continue
+			} else {
+				needSyncLayers := make([]string, 0, len(tasks))
+				for _, v := range tasks {
+					needSyncLayers = append(needSyncLayers, v.Specifier()[:10])
+				}
+				s.log().WithFields(logrus.Fields{
+					"image-id":         repo.Encoded()[:10],
+					"need-sync-layers": needSyncLayers,
+				}).Debug()
 			}
 			s.transfers[repo] = tasks
 			for _, t := range tasks {
 				if _, exists := s.tasks[t.Specifier()]; exists {
-					log.Logger.WithFields(logrus.Fields{
-						"node-id":   s.nodeID,
-						"image-id":  repo.String(),
-						"specifier": t.Specifier(),
-					}).Debugf("task already exists")
+					s.log().WithFields(logrus.Fields{
+						"image-id":  repo.Encoded()[:10],
+						"specifier": t.Specifier()[:10],
+					}).Debug("task already exists")
 					continue
 				}
 				s.tasks[t.Specifier()] = t
@@ -288,12 +319,15 @@ func (s *Server) syncLoop(ctx context.Context) error {
 			}
 			if succeeded {
 				finishedReposToAdd = append(finishedReposToAdd, imageID)
+				// move succeeded repo to succeededTransfers
+				delete(s.transfers, imageID)
+				s.succeededTransfers[imageID] = struct{}{}
 			}
 		}
 
 		//lock and write the file
 		if len(finishedReposToAdd) != 0 {
-			err := s.lock(ctx)
+			err := s.lock(cctx)
 			if err != nil {
 				return err
 			}
@@ -308,7 +342,7 @@ func (s *Server) syncLoop(ctx context.Context) error {
 				return err
 			}
 			ioutils.AtomicWriteFile(s.targetRepositoryFilePath, data, 0644)
-			if err = s.unLock(ctx); err != nil {
+			if err = s.unLock(cctx); err != nil {
 				return err
 			}
 		}
@@ -318,11 +352,9 @@ func (s *Server) syncLoop(ctx context.Context) error {
 			failed := false
 			for _, t := range tasks {
 				if t.Status() == task.StatusFinished && t.Result() != nil {
-					log.Logger.WithFields(logrus.Fields{
-						"node-id":   s.nodeID,
-						"image-id":  imageID,
-						"specifier": t.Specifier(),
-					}).WithError(t.Result()).Error("task failed with error")
+					s.log().WithFields(logrus.Fields{
+						"specifier": t.Specifier()[:10],
+					}).WithError(t.Result()).Error("task failed")
 					failed = true
 					delete(s.tasks, t.Specifier())
 				}
@@ -330,6 +362,15 @@ func (s *Server) syncLoop(ctx context.Context) error {
 			if failed {
 				delete(s.transfers, imageID)
 			}
+		}
+
+		select {
+		case <-s.shutdown:
+			exit = true
+		case <-ticker.C:
+		}
+		if exit {
+			break
 		}
 	}
 	return nil
@@ -339,12 +380,11 @@ func (s *Server) newImageTransferTasks(ctx context.Context, repo digest.Digest) 
 	algo, imageID := repo.Algorithm().String(), repo.Encoded()
 	imageConfigFilePath := filepath.Join(s.metaDataDir, "imagedb", "content", algo, imageID)
 	var (
-		imageConfig          *image.Image
-		configByte           []byte
-		err                  error
-		chainIDs             []digest.Digest
-		tasks                []*task.Task
-		needToSyncSpecifiers []string
+		imageConfig = &image.Image{}
+		configByte  []byte
+		err         error
+		chainIDs    []digest.Digest
+		tasks       []*task.Task
 	)
 	//read image config from src dir
 	if configByte, err = ioutil.ReadFile(imageConfigFilePath); err != nil {
@@ -360,10 +400,6 @@ func (s *Server) newImageTransferTasks(ctx context.Context, repo digest.Digest) 
 		rootFS.Append(v)
 		chainIDs = append(chainIDs, digest.Digest(rootFS.ChainID()))
 	}
-	log.Logger.WithFields(logrus.Fields{
-		"node-id":  s.nodeID,
-		"image-id": repo.String(),
-	}).Debugf("image have tasks %v", chainIDs)
 
 	for _, id := range chainIDs {
 		t, err := s.newLayerTransferTask(ctx, id)
@@ -371,13 +407,8 @@ func (s *Server) newImageTransferTasks(ctx context.Context, repo digest.Digest) 
 			return tasks, err
 		} else if t != nil {
 			tasks = append(tasks, t)
-			needToSyncSpecifiers = append(needToSyncSpecifiers, t.Specifier())
 		}
 	}
-	log.Logger.WithFields(logrus.Fields{
-		"node-id":  s.nodeID,
-		"image-id": repo.String(),
-	}).Debugf("really need to sync %v", needToSyncSpecifiers)
 
 	return tasks, nil
 }
@@ -405,7 +436,7 @@ func (s *Server) newLayerTransferTask(ctx context.Context, chainID digest.Digest
 		}
 		return nil
 	}
-	return s.newRegisteredTask(ctx, chainID.String(), types.DefaultSync, layerTransferJob)
+	return s.newRegisteredTask(ctx, chainID.Encoded(), types.DefaultSync, layerTransferJob)
 }
 
 type checkResult struct {
@@ -468,8 +499,12 @@ func (s *Server) newRegisteredTask(ctx context.Context, specifier string, t type
 	if err != nil {
 		return nil, err
 	}
-	if resp.Result == types.RegisterFailed {
-		log.Logger.WithField("node-id", s.nodeID).Debugf("task %v is running or finished by node %v", specifier, resp.RunningBy)
+	if resp.Result != types.RegisterSucceeded {
+		if resp.Result == types.RegisterAlreadyExist {
+			s.log().Debugf("task %v is running or finished by node %v", specifier[:10], resp.RunningBy)
+		} else {
+			s.log().Error(resp.Msg)
+		}
 		return nil, nil
 	}
 	res := task.NewTask(specifier, t, job)
@@ -487,6 +522,7 @@ func (s *Server) lock(ctx context.Context) error {
 		err error
 	)
 	rand.Seed(time.Now().Unix())
+	timer := time.NewTimer(lockRetryInterval + time.Duration(rand.Intn(1000))*time.Millisecond)
 
 	for {
 		res, err = s.supernode.Lock(ctx, req)
@@ -496,8 +532,13 @@ func (s *Server) lock(ctx context.Context) error {
 		if res.Result == types.LockSucceeded {
 			return nil
 		}
-		log.Logger.WithField("node-id", s.nodeID).Debugf("failed to get lock, lock is occupied by node %v", res.OccupiedBy)
-		time.Sleep(lockRetryInterval + time.Duration(rand.Intn(1000))*time.Millisecond)
+		s.log().Debugf("failed to get lock, lock is occupied by node %v", res.OccupiedBy)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-timer.C:
+			timer.Reset(lockRetryInterval + time.Duration(rand.Intn(1000))*time.Millisecond)
+		}
 	}
 	return err
 }
@@ -522,6 +563,13 @@ func (s *Server) initDir(driver, dockerRoot string) {
 	s.targetLayerDBDir = filepath.Join(s.syncDir, "image", driver, "layerdb")
 	s.targetLayerDataDir = filepath.Join(s.syncDir, driver)
 	s.targetRepositoryFilePath = filepath.Join(s.syncDir, "image", driver, repositoryFileName)
+}
+
+func (s *Server) log() *logrus.Entry {
+	if s.registered {
+		return log.Logger.WithField("node-id", s.nodeID)
+	}
+	return log.Logger.WithField("node-id", "unknown")
 }
 
 func getDockerInfo(ctx context.Context) (string, string, error) {

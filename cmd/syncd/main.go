@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
 	"os"
+	"os/signal"
+
+	"github.com/YLonely/sync-util/signals"
 
 	"github.com/YLonely/sync-util/syncd"
 	"github.com/urfave/cli"
@@ -37,6 +41,18 @@ func main() {
 	}
 
 	app.Action = func(c *cli.Context) error {
+		signalC := make(chan os.Signal, 2048)
+		ctx := context.Background()
+		s, err := syncd.NewServer(config)
+		if err != nil {
+			return err
+		}
+		errorC := s.Start(ctx)
+		signal.Notify(signalC, signals.HandledSignals...)
+		done := signals.HandleSignals(func() {
+			s.Stop(ctx)
+		}, signalC, errorC)
+		<-done
 		return nil
 	}
 

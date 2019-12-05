@@ -19,7 +19,7 @@ func AtomicDirCopy(ctx context.Context, src, dest string) error {
 		return err
 	}
 	newTempDir := filepath.Join(filepath.Dir(dest), ".tmp-"+filepath.Base(dest))
-	err = copy(ctx, src, dest, info)
+	err = copy(ctx, src, newTempDir, info)
 	if err != nil {
 		os.RemoveAll(newTempDir)
 		return err
@@ -27,10 +27,10 @@ func AtomicDirCopy(ctx context.Context, src, dest string) error {
 	return os.Rename(newTempDir, dest)
 }
 
-// copy dispatches copy-funcs according to the mode.
-// Because this "copy" could be called recursively,
-// "info" MUST be given here, NOT nil.
 func copy(ctx context.Context, src, dest string, info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return lcopy(src, dest, info)
+	}
 	if info.IsDir() {
 		return dcopy(ctx, src, dest, info)
 	}
@@ -41,17 +41,19 @@ func copy(ctx context.Context, src, dest string, info os.FileInfo) error {
 // with considering existence of parent directory
 // and file permission.
 func fcopy(src, dest string, info os.FileInfo) error {
+	if info.Mode()&os.ModeDevice != 0 {
+		//we don't copy device file, cause we can't copy it
+		return nil
+	}
 
 	if err := os.MkdirAll(filepath.Dir(dest), os.ModePerm); err != nil {
 		return err
 	}
-
 	f, err := os.Create(dest)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-
 	if err = os.Chmod(f.Name(), info.Mode()); err != nil {
 		return err
 	}
@@ -99,4 +101,12 @@ func dcopy(ctx context.Context, srcdir, destdir string, info os.FileInfo) error 
 	}
 
 	return nil
+}
+
+func lcopy(src, dest string, info os.FileInfo) error {
+	src, err := os.Readlink(src)
+	if err != nil {
+		return err
+	}
+	return os.Symlink(src, dest)
 }

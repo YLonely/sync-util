@@ -4,6 +4,7 @@ type RegisterResponseType int
 
 const (
 	RegisterSucceeded RegisterResponseType = iota
+	RegisterAlreadyExist
 	RegisterFailed
 )
 
@@ -11,4 +12,5 @@ const (
 type TaskRegisterResponse struct {
 	Result    RegisterResponseType `json:"result"`
 	RunningBy uint                 `json:"running_by"`
+	Msg       string               `json:"msg"`
 }

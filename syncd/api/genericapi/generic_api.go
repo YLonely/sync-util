@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/YLonely/sync-util/log"
 
 	"github.com/YLonely/sync-util/api/types"
 	"github.com/YLonely/sync-util/supernode/urls"
@@ -21,7 +20,7 @@ func NewSuperNodeAPI(ip, port string) (api.SuperNodeAPI, error) {
 		nodeIP:   ip,
 		nodePort: port,
 		client:   &http.Client{},
-		timeout:  time.Second * 5,
+		timeout:  time.Second * 3,
 	}, nil
 }
 
@@ -36,10 +35,11 @@ var _ api.SuperNodeAPI = &genericAPI{}
 const (
 	contentTypeKey   = "Content-Type"
 	contentTypeValue = "application/json"
+	formatTemplate   = "http://%s:%s%s"
 )
 
 func (g *genericAPI) NodeRegister(ctx context.Context) (*types.NodeRegisterResponse, error) {
-	url := fmt.Sprintf("%s:%s%s", g.nodeIP, g.nodePort, urls.NodeRegisterPath)
+	url := fmt.Sprintf(formatTemplate, g.nodeIP, g.nodePort, urls.NodeRegisterPath)
 	res := &types.NodeRegisterResponse{}
 	err := g.do(ctx, url, "", res)
 	if err != nil {
@@ -49,7 +49,7 @@ func (g *genericAPI) NodeRegister(ctx context.Context) (*types.NodeRegisterRespo
 }
 
 func (g *genericAPI) TaskRegister(ctx context.Context, req *types.TaskRegisterRequest) (*types.TaskRegisterResponse, error) {
-	url := fmt.Sprintf("%s:%s%s", g.nodeIP, g.nodePort, urls.TaskRegisterPath)
+	url := fmt.Sprintf(formatTemplate, g.nodeIP, g.nodePort, urls.TaskRegisterPath)
 	res := &types.TaskRegisterResponse{}
 	err := g.do(ctx, url, req, res)
 	if err != nil {
@@ -59,7 +59,7 @@ func (g *genericAPI) TaskRegister(ctx context.Context, req *types.TaskRegisterRe
 }
 
 func (g *genericAPI) Lock(ctx context.Context, req *types.LockRequest) (*types.LockResponse, error) {
-	url := fmt.Sprintf("%s:%s%s", g.nodeIP, g.nodePort, urls.LockPath)
+	url := fmt.Sprintf(formatTemplate, g.nodeIP, g.nodePort, urls.LockPath)
 	res := &types.LockResponse{}
 	err := g.do(ctx, url, req, res)
 	if err != nil {
@@ -69,7 +69,7 @@ func (g *genericAPI) Lock(ctx context.Context, req *types.LockRequest) (*types.L
 }
 
 func (g *genericAPI) UnLock(ctx context.Context, req *types.UnLockRequest) (*types.UnLockResponse, error) {
-	url := fmt.Sprintf("%s:%s%s", g.nodeIP, g.nodePort, urls.UnLockPath)
+	url := fmt.Sprintf(formatTemplate, g.nodeIP, g.nodePort, urls.UnLockPath)
 	res := &types.UnLockResponse{}
 	err := g.do(ctx, url, req, res)
 	if err != nil {
@@ -117,7 +117,7 @@ func (g *genericAPI) postJSON(ctx context.Context, url string, body interface{},
 	req.Header.Set(contentTypeKey, contentTypeValue)
 	resp, err := g.client.Do(req)
 
-	log.Logger.WithField("url", url).WithField("body", body).Debug("post json")
+	// log.Logger.WithField("url", url).WithField("body", body).Debug("post json")
 
 	if err != nil {
 		return http.StatusBadRequest, nil, err
