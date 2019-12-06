@@ -14,16 +14,24 @@ const (
 )
 
 func AtomicDirCopy(ctx context.Context, src, dest string) error {
-	info, err := os.Lstat(src)
-	if err != nil {
+	var (
+		info       os.FileInfo
+		newTempDir string
+		err        error
+	)
+	defer func() {
+		if err != nil && newTempDir != "" {
+			os.RemoveAll(newTempDir)
+		}
+	}()
+	if info, err = os.Lstat(src); err != nil {
 		return err
 	}
-	newTempDir := filepath.Join(filepath.Dir(dest), ".tmp-"+filepath.Base(dest))
-	err = copy(ctx, src, newTempDir, info)
-	if err != nil {
-		os.RemoveAll(newTempDir)
+	newTempDir = filepath.Join(filepath.Dir(dest), ".tmp-"+filepath.Base(dest))
+	if err = copy(ctx, src, newTempDir, info); err != nil {
 		return err
 	}
+
 	return os.Rename(newTempDir, dest)
 }
 

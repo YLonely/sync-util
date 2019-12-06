@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -52,11 +53,14 @@ type Server struct {
 	shutdown                                                       chan struct{}
 	//tasks maps a specifier to a task
 	tasks map[string]*task.Task
-	//transfer represents a bunch of tasks related to an image
-	//transfers records a bunch of transfers
-	transfers map[digest.Digest][]*task.Task
 
-	succeededTransfers map[digest.Digest]struct{}
+	runningTransfer *transfer
+}
+
+// transfer represents a bunch of tasks related to a image
+type transfer struct {
+	id    digest.Digest
+	tasks []*task.Task
 }
 
 const (
@@ -72,12 +76,10 @@ const (
 //NewServer init a server instance
 func NewServer(c Config) (*Server, error) {
 	s := &Server{
-		syncDir:            c.SyncDir,
-		lockTimeout:        time.Second * 5,
-		shutdown:           make(chan struct{}, 1),
-		tasks:              map[string]*task.Task{},
-		transfers:          map[digest.Digest][]*task.Task{},
-		succeededTransfers: map[digest.Digest]struct{}{},
+		syncDir:     c.SyncDir,
+		lockTimeout: time.Second * 5,
+		shutdown:    make(chan struct{}, 1),
+		tasks:       map[string]*task.Task{},
 	}
 	var err error
 	if len(c.SuperNodeIP) == 0 || len(c.SuperNodePort) == 0 {
@@ -248,119 +250,105 @@ func (s *Server) syncLoop(ctx context.Context) error {
 	s.log().Info("start synchronizing...")
 	ticker := time.NewTicker(syncLoopInterval)
 	for {
-		if err := readJSONFile(srcRepositoryFilePath, srcRepository); err != nil {
-			return err
-		}
-		if err := readJSONFile(s.targetRepositoryFilePath, targetFlattenRepos); err != nil {
-			return err
-		}
-		srcFlattenRepos := srcRepository.GetAllRepos()
-		diffRepos := calcRepoDiff(srcFlattenRepos, *targetFlattenRepos)
-		if len(diffRepos) == 0 {
-			s.log().Debug("no repos need to be synchronized")
-		} else {
-			repos := make([]string, 0, len(diffRepos))
-			for _, v := range diffRepos {
-				repos = append(repos, v.Encoded()[:10])
-			}
-			s.log().WithField("different-repos", repos).Debug()
-		}
 
-		// start to dispatch tasks
-		for _, repo := range diffRepos {
-			if _, exists := s.succeededTransfers[repo]; exists {
-				s.log().WithField("image-id", repo.Encoded()[:10]).Debug("a same transfer already succeeded, skip this one")
-				continue
-			}
-			if _, exists := s.transfers[repo]; exists {
-				s.log().WithField("image-id", repo.Encoded()[:10]).Debug("a same transfer is running, skip this one")
-				continue
-			}
-			tasks, err := s.newImageTransferTasks(cctx, repo)
-			if err != nil {
+		if s.runningTransfer == nil {
+			//we only pick one runable image transfer to run
+			if err := readJSONFile(srcRepositoryFilePath, srcRepository); err != nil {
 				return err
 			}
-			if len(tasks) == 0 {
-				s.log().WithField("image-id", repo.Encoded()[:10]).Warn("wait for others to transfer this image")
-				continue
-			} else {
-				needSyncLayers := make([]string, 0, len(tasks))
-				for _, v := range tasks {
-					needSyncLayers = append(needSyncLayers, v.Specifier()[:10])
-				}
-				s.log().WithFields(logrus.Fields{
-					"image-id":         repo.Encoded()[:10],
-					"need-sync-layers": needSyncLayers,
-				}).Debug()
+			if err := readJSONFile(s.targetRepositoryFilePath, targetFlattenRepos); err != nil {
+				return err
 			}
-			s.transfers[repo] = tasks
-			for _, t := range tasks {
-				if _, exists := s.tasks[t.Specifier()]; exists {
+			srcFlattenRepos := srcRepository.GetAllRepos()
+			diffRepos := calcRepoDiff(srcFlattenRepos, *targetFlattenRepos)
+			if len(diffRepos) == 0 {
+				s.log().Debug("no repos need to be synchronized")
+			} else {
+				repos := make([]string, 0, len(diffRepos))
+				for _, v := range diffRepos {
+					repos = append(repos, v.Encoded()[:10])
+				}
+				s.log().WithField("different-repos", repos).Debug()
+			}
+
+			// start to dispatch tasks
+			for _, repo := range diffRepos {
+				tasks, err := s.newImageTransferTasks(cctx, repo)
+				if err != nil {
+					return err
+				}
+				if len(tasks) == 0 {
+					s.log().WithField("image-id", repo.Encoded()[:10]).Warn("wait for others to transfer this image")
+					continue
+				} else {
+					needSyncLayers := make([]string, 0, len(tasks))
+					for _, v := range tasks {
+						needSyncLayers = append(needSyncLayers, v.Specifier()[:10])
+					}
 					s.log().WithFields(logrus.Fields{
-						"image-id":  repo.Encoded()[:10],
-						"specifier": t.Specifier()[:10],
-					}).Debug("task already exists")
+						"image-id":         repo.Encoded()[:10],
+						"need-sync-layers": needSyncLayers,
+					}).Debug()
+				}
+				s.runningTransfer = &transfer{id: repo, tasks: tasks}
+				emptyTransfer := true
+				for _, t := range tasks {
+					if _, exists := s.tasks[t.Specifier()]; exists {
+						s.log().WithFields(logrus.Fields{
+							"image-id":  repo.Encoded()[:10],
+							"specifier": t.Specifier()[:10],
+						}).Debug("task already exists")
+						continue
+					}
+					s.tasks[t.Specifier()] = t
+					go t.Run(cctx)
+					emptyTransfer = false
+				}
+				if emptyTransfer {
+					s.runningTransfer = nil
 					continue
 				}
-				s.tasks[t.Specifier()] = t
-				go t.Run(cctx)
+				//well, find one, just break
+				break
 			}
 		}
 
-		//here we find some finished and succeeded image transfers to add to the repositories.json
-		var finishedReposToAdd []digest.Digest
-		for imageID, tasks := range s.transfers {
+		// is this running transfer succeeded and should be added to repository file
+		// or it failed should be tagged as failedTransfer
+		if s.runningTransfer != nil {
 			succeeded := true
-			for _, t := range tasks {
+			for _, t := range s.runningTransfer.tasks {
 				if t.Status() != task.StatusFinished || t.Result() != nil {
 					succeeded = false
-					break
+				}
+				if t.Status() == task.StatusFinished && t.Result() != nil {
+					s.log().WithField("specifier", t.Specifier()[:10]).WithError(t.Result()).Error("task failed, retry it")
+					go t.Run(cctx)
 				}
 			}
 			if succeeded {
-				finishedReposToAdd = append(finishedReposToAdd, imageID)
-				// move succeeded repo to succeededTransfers
-				delete(s.transfers, imageID)
-				s.succeededTransfers[imageID] = struct{}{}
-			}
-		}
-
-		//lock and write the file
-		if len(finishedReposToAdd) != 0 {
-			err := s.lock(cctx)
-			if err != nil {
-				return err
-			}
-			if err = readJSONFile(s.targetRepositoryFilePath, targetFlattenRepos); err != nil {
-				return err
-			}
-			for _, v := range finishedReposToAdd {
-				(*targetFlattenRepos)[v] = struct{}{}
-			}
-			data, err := json.Marshal(targetFlattenRepos)
-			if err != nil {
-				return err
-			}
-			ioutils.AtomicWriteFile(s.targetRepositoryFilePath, data, 0644)
-			if err = s.unLock(cctx); err != nil {
-				return err
-			}
-		}
-
-		//do some clean ups, erase those failed transfers and tasks
-		for imageID, tasks := range s.transfers {
-			failed := false
-			for _, t := range tasks {
-				if t.Status() == task.StatusFinished && t.Result() != nil {
-					s.log().WithFields(logrus.Fields{
-						"specifier": t.Specifier()[:10],
-					}).WithError(t.Result()).Error("task failed")
-					failed = true
-					delete(s.tasks, t.Specifier())
+				// this is not a good idea i think, cause it will influence the whole system
+				// but if we don't sync before lock, the AtomicWriteFile will waste too much time, which leads to the timeout of the lock
+				syscall.Sync()
+				err := s.lock(cctx)
+				if err != nil {
+					return err
 				}
-			}
-			if failed {
-				delete(s.transfers, imageID)
+				s.log().Debug("locked")
+				if err = readJSONFile(s.targetRepositoryFilePath, targetFlattenRepos); err != nil {
+					return err
+				}
+				(*targetFlattenRepos)[s.runningTransfer.id] = struct{}{}
+				data, err := json.Marshal(targetFlattenRepos)
+				if err != nil {
+					return err
+				}
+				ioutils.AtomicWriteFile(s.targetRepositoryFilePath, data, 0644)
+				if err = s.unLock(cctx); err != nil {
+					return err
+				}
+				s.log().WithField("succeeded-image", s.runningTransfer.id.Encoded()[:10]).Debug()
+				s.runningTransfer = nil
 			}
 		}
 
