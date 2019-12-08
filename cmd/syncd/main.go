@@ -20,19 +20,19 @@ func main() {
 	app.Version = "v0.0.1"
 
 	app.Flags = []cli.Flag{
-		cli.StringFlag{
+		&cli.StringFlag{
 			Name:        "node-ip",
 			Usage:       "Specify the ip of the super node",
 			Destination: &(config.SuperNodeIP),
 			Value:       "",
 		},
-		cli.StringFlag{
+		&cli.StringFlag{
 			Name:        "node-port",
 			Usage:       "Specify the port of the super node",
 			Destination: &(config.SuperNodePort),
 			Value:       "",
 		},
-		cli.StringFlag{
+		&cli.StringFlag{
 			Name:        "sync-dir",
 			Usage:       "Specify the dir to sync to",
 			Destination: &(config.SyncDir),

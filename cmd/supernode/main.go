@@ -20,7 +20,7 @@ func main() {
 	app.Version = "v0.0.1"
 
 	app.Flags = []cli.Flag{
-		cli.StringFlag{
+		&cli.StringFlag{
 			Name:        "port",
 			Usage:       "Specify a port to listen on",
 			Destination: &config.Port,

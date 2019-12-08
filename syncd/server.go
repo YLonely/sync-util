@@ -68,7 +68,7 @@ const (
 	registerRetry               = 5
 	lockRetryInterval           = time.Second * 5
 	remoteDirCheckRetryInterval = time.Second * 5
-	syncLoopInterval            = time.Second * 30
+	syncLoopInterval            = time.Second * 60
 
 	repositoryFileName = "repositories.json"
 )
@@ -334,7 +334,6 @@ func (s *Server) syncLoop(ctx context.Context) error {
 				if err != nil {
 					return err
 				}
-				s.log().Debug("locked")
 				if err = readJSONFile(s.targetRepositoryFilePath, targetFlattenRepos); err != nil {
 					return err
 				}
