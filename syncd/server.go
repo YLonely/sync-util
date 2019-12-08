@@ -68,7 +68,7 @@ const (
 	registerRetry               = 5
 	lockRetryInterval           = time.Second * 5
 	remoteDirCheckRetryInterval = time.Second * 5
-	syncLoopInterval            = time.Second * 60
+	syncLoopInterval            = time.Second * 30
 
 	repositoryFileName = "repositories.json"
 )
