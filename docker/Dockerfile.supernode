@@ -1,0 +1,8 @@
+FROM ubuntu
+
+COPY ./bin/supernode /supernode
+RUN chmod u+x /supernode
+
+# port 12345
+CMD [ "/supernode" ]
+

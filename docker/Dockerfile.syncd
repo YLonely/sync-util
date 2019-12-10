@@ -1,0 +1,6 @@
+FROM ubuntu
+
+COPY ./bin/syncd /syncd
+RUN chmod u+x /syncd
+
+CMD [ "/bin/bash" ]
