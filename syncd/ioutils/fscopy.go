@@ -27,6 +27,14 @@ func AtomicDirCopy(ctx context.Context, src, dest string) error {
 	if info, err = os.Lstat(src); err != nil {
 		return err
 	}
+	if _, err = os.Stat(dest); err == nil {
+		// already exists
+		return nil
+	} else if os.IsNotExist(err) {
+		err = nil
+	} else {
+		return err
+	}
 	newTempDir = filepath.Join(filepath.Dir(dest), ".tmp-"+filepath.Base(dest))
 	if err = copy(ctx, src, newTempDir, info); err != nil {
 		return err
@@ -116,5 +124,8 @@ func lcopy(src, dest string, info os.FileInfo) error {
 	if err != nil {
 		return err
 	}
-	return os.Symlink(src, dest)
+	if err = os.Symlink(src, dest); os.IsExist(err) {
+		err = nil
+	}
+	return err
 }

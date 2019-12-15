@@ -61,6 +61,7 @@ type Server struct {
 type transfer struct {
 	id    digest.Digest
 	tasks []*task.Task
+	retry uint
 }
 
 const (
@@ -69,6 +70,7 @@ const (
 	lockRetryInterval           = time.Second * 5
 	remoteDirCheckRetryInterval = time.Second * 5
 	syncLoopInterval            = time.Second * 30
+	syncLoopRetry               = 3
 
 	repositoryFileName = "repositories.json"
 )
@@ -275,10 +277,11 @@ func (s *Server) syncLoop(ctx context.Context) error {
 			for _, repo := range diffRepos {
 				tasks, err := s.newImageTransferTasks(cctx, repo)
 				if err != nil {
-					return err
+					s.log().WithField("image-id", repo.Encoded()[:10]).WithError(err).Error("failed to get tasks")
+					continue
 				}
 				if len(tasks) == 0 {
-					s.log().WithField("image-id", repo.Encoded()[:10]).Warn("wait for others to transfer this image")
+					s.log().WithField("image-id", repo.Encoded()[:10]).Warn("other node is transferring this image")
 					continue
 				} else {
 					needSyncLayers := make([]string, 0, len(tasks))
@@ -317,14 +320,25 @@ func (s *Server) syncLoop(ctx context.Context) error {
 		// or it failed should be tagged as failedTransfer
 		if s.runningTransfer != nil {
 			succeeded := true
+			hasRetried := false
+			skip := false
 			for _, t := range s.runningTransfer.tasks {
 				if t.Status() != task.StatusFinished || t.Result() != nil {
 					succeeded = false
 				}
 				if t.Status() == task.StatusFinished && t.Result() != nil {
+					if s.runningTransfer.retry >= syncLoopRetry {
+						s.log().WithField("image-id", s.runningTransfer.id.Encoded()[:10]).Warnf("retry %v times, skip it", s.runningTransfer.retry)
+						skip = true
+						break
+					}
 					s.log().WithField("specifier", t.Specifier()[:10]).WithError(t.Result()).Error("task failed, retry it")
+					hasRetried = true
 					go t.Run(cctx)
 				}
+			}
+			if hasRetried {
+				s.runningTransfer.retry++
 			}
 			if succeeded {
 				// this is not a good idea i think, cause it will influence the whole system
@@ -347,6 +361,9 @@ func (s *Server) syncLoop(ctx context.Context) error {
 					return err
 				}
 				s.log().WithField("succeeded-image", s.runningTransfer.id.Encoded()[:10]).Debug()
+				s.runningTransfer = nil
+			}
+			if skip {
 				s.runningTransfer = nil
 			}
 		}
