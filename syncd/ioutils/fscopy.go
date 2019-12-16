@@ -55,6 +55,9 @@ func copy(ctx context.Context, src, dest string, info os.FileInfo) error {
 		return copyDevice(src, dest, info)
 	case fileMode&os.ModeNamedPipe != 0:
 		return copyNamedPipe(src, dest, info)
+	case fileMode&os.ModeSocket != 0:
+		// do nothing about socket
+		return nil
 	default:
 		return copyRegularFile(src, dest, info)
 	}
