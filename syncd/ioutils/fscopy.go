@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 const (
@@ -44,24 +45,50 @@ func AtomicDirCopy(ctx context.Context, src, dest string) error {
 }
 
 func copy(ctx context.Context, src, dest string, info os.FileInfo) error {
-	if info.Mode()&os.ModeSymlink != 0 {
-		return lcopy(src, dest, info)
+	fileMode := info.Mode()
+	switch {
+	case fileMode&os.ModeSymlink != 0:
+		return copyLink(src, dest, info)
+	case fileMode&os.ModeDir != 0:
+		return copyDir(ctx, src, dest, info)
+	case fileMode&os.ModeDevice != 0:
+		return copyDevice(src, dest, info)
+	case fileMode&os.ModeNamedPipe != 0:
+		return copyNamedPipe(src, dest, info)
+	default:
+		return copyRegularFile(src, dest, info)
 	}
-	if info.IsDir() {
-		return dcopy(ctx, src, dest, info)
-	}
-	return fcopy(src, dest, info)
 }
 
-// fcopy is for just a file,
-// with considering existence of parent directory
-// and file permission.
-func fcopy(src, dest string, info os.FileInfo) error {
-	if info.Mode()&os.ModeDevice != 0 {
-		//we don't copy device file, cause we can't copy it
-		return nil
+func copyNamedPipe(src, dest string, info os.FileInfo) error {
+	if err := os.MkdirAll(filepath.Dir(dest), os.ModePerm); err != nil {
+		return err
 	}
+	if err := syscall.Mkfifo(dest, 0644); err != nil && !os.IsExist(err) {
+		return err
+	}
+	return os.Chmod(dest, info.Mode())
+}
 
+func copyDevice(src, dest string, info os.FileInfo) error {
+	if err := os.MkdirAll(filepath.Dir(dest), os.ModePerm); err != nil {
+		return err
+	}
+	stat := info.Sys().(*syscall.Stat_t)
+	dev := stat.Rdev
+	var err error
+	if info.Mode()&os.ModeCharDevice != 0 {
+		err = syscall.Mknod(dest, syscall.S_IFCHR|0644, int(dev))
+	} else {
+		err = syscall.Mknod(dest, syscall.S_IFBLK|0644, int(dev))
+	}
+	if os.IsExist(err) {
+		err = nil
+	}
+	return os.Chmod(dest, info.Mode())
+}
+
+func copyRegularFile(src, dest string, info os.FileInfo) error {
 	if err := os.MkdirAll(filepath.Dir(dest), os.ModePerm); err != nil {
 		return err
 	}
@@ -84,14 +111,10 @@ func fcopy(src, dest string, info os.FileInfo) error {
 	return err
 }
 
-// dcopy is for a directory,
-// with scanning contents inside the directory
-// and pass everything to "copy" recursively.
-func dcopy(ctx context.Context, srcdir, destdir string, info os.FileInfo) error {
+func copyDir(ctx context.Context, srcdir, destdir string, info os.FileInfo) error {
 
 	originalMode := info.Mode()
 
-	// Make dest dir with 0755 so that everything writable.
 	if err := os.MkdirAll(destdir, tmpPermissionForDirectory); err != nil {
 		return err
 	}
@@ -119,7 +142,7 @@ func dcopy(ctx context.Context, srcdir, destdir string, info os.FileInfo) error 
 	return nil
 }
 
-func lcopy(src, dest string, info os.FileInfo) error {
+func copyLink(src, dest string, info os.FileInfo) error {
 	src, err := os.Readlink(src)
 	if err != nil {
 		return err
