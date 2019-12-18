@@ -15,3 +15,11 @@ type TaskRegisterRequest struct {
 	TaskSpecifier string   `json:"task_specifier"`
 	Type          SyncType `json:"type"`
 }
+
+//TaskRegisterResponse represents the register response
+type TaskRegisterResponse struct {
+	Result     ResponseType `json:"result"`
+	TaskStatus TaskStatus   `json:"task_status"`
+	NodeID     uint         `json:"node_id"`
+	Msg        string       `json:"msg"`
+}

@@ -22,18 +22,28 @@ func (fake *fakeAPI) NodeRegister(ctx context.Context) (*types.NodeRegisterRespo
 
 func (fake *fakeAPI) TaskRegister(ctx context.Context, req *types.TaskRegisterRequest) (*types.TaskRegisterResponse, error) {
 	return &types.TaskRegisterResponse{
-		Result: types.RegisterSucceeded,
+		Result: types.ResponseTypeSucceeded,
 	}, nil
 }
 
 func (fake *fakeAPI) Lock(ctx context.Context, req *types.LockRequest) (*types.LockResponse, error) {
 	return &types.LockResponse{
-		Result: types.LockSucceeded,
+		Result: types.ResponseTypeSucceeded,
 	}, nil
 }
 
 func (fake *fakeAPI) UnLock(ctx context.Context, req *types.UnLockRequest) (*types.UnLockResponse, error) {
 	return &types.UnLockResponse{
-		Result: types.UnLockSucceeded,
+		Result: types.ResponseTypeSucceeded,
+	}, nil
+}
+
+func (fake *fakeAPI) TaskStatus(ctx context.Context, req *types.TaskStatusRequest) (*types.TaskStatusResponse, error) {
+	return &types.TaskStatusResponse{}, nil
+}
+
+func (fake *fakeAPI) TaskStatusReport(ctx context.Context, req *types.TaskStatusReportRequest) (*types.TaskStatusReportResponse, error) {
+	return &types.TaskStatusReportResponse{
+		Result: types.ResponseTypeSucceeded,
 	}, nil
 }

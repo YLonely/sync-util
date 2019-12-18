@@ -32,11 +32,11 @@ func NewServer(c Config) (*Server, error) {
 		server: &http.Server{
 			Addr: ":" + c.Port,
 		},
-		tasks:    map[types.SyncType]map[string]uint{},
+		tasks:    map[types.SyncType]map[string]*task{},
 		jsonPath: filepath.Join(homeDir, "server.json"),
 	}
-	s.tasks[types.DefaultSync] = map[string]uint{}
-	s.tasks[types.DirStructureSync] = map[string]uint{}
+	s.tasks[types.DefaultSync] = map[string]*task{}
+	s.tasks[types.DirStructureSync] = map[string]*task{}
 	if err := s.reload(); err != nil {
 		return nil, err
 	}
@@ -48,12 +48,17 @@ type Server struct {
 	server     *http.Server
 	MaxNodeID  uint
 	idMutex    sync.Mutex
-	tasks      map[types.SyncType]map[string]uint
+	tasks      map[types.SyncType]map[string]*task
 	taskMutex  sync.Mutex
 	lockNodeID uint
 	lockMutex  sync.Mutex
 	jsonPath   string
 	lockIndex  uint64
+}
+
+type task struct {
+	nodeID uint
+	status types.TaskStatus
 }
 
 const (
@@ -109,7 +114,7 @@ func (s *Server) taskRegister(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := &types.TaskRegisterResponse{
-		Result: types.RegisterFailed,
+		Result: types.ResponseTypeFailed,
 	}
 	specifier := request.TaskSpecifier
 	if len(specifier) > 10 {
@@ -142,12 +147,79 @@ func (s *Server) taskRegister(rw http.ResponseWriter, r *http.Request) {
 	}
 	s.taskMutex.Lock()
 	defer s.taskMutex.Unlock()
-	if runningBy, exists := s.tasks[request.Type][request.TaskSpecifier]; exists {
-		resp.Result = types.RegisterAlreadyExist
-		resp.RunningBy = runningBy
+	if t, exists := s.tasks[request.Type][request.TaskSpecifier]; exists && t.status != types.TaskStatusFailed {
+		resp.Result = types.ResponseTypeFailed
+		resp.TaskStatus = t.status
+		resp.NodeID = t.nodeID
 	} else {
-		resp.Result = types.RegisterSucceeded
-		s.tasks[request.Type][request.TaskSpecifier] = request.NodeID
+		resp.Result = types.ResponseTypeSucceeded
+		resp.TaskStatus = types.TaskStatusUnknown
+		s.tasks[request.Type][request.TaskSpecifier] = &task{nodeID: request.NodeID, status: types.TaskStatusRunning}
+	}
+	if err := encodeResponse(rw, http.StatusOK, resp); err != nil {
+		log.Logger.WithError(err).Error()
+	}
+}
+
+func (s *Server) taskStatus(rw http.ResponseWriter, r *http.Request) {
+	reader := r.Body
+	request := &types.TaskStatusRequest{}
+	if err := json.NewDecoder(reader).Decode(request); err != nil {
+		log.Logger.WithError(err).Error()
+	}
+	resp := &types.TaskStatusResponse{}
+	specifier := request.TaskSpecifier
+	if len(specifier) > 10 {
+		specifier = specifier[:10]
+	}
+	log.Logger.WithFields(logrus.Fields{
+		"type":           "task-status-require",
+		"node-id":        request.NodeID,
+		"task-specifier": specifier,
+	}).Debug()
+	s.taskMutex.Lock()
+	defer s.taskMutex.Unlock()
+	if t, exists := s.tasks[request.Type][request.TaskSpecifier]; exists {
+		resp.NodeID = t.nodeID
+		resp.Status = t.status
+	} else {
+		resp.Status = types.TaskStatusUnknown
+	}
+	if err := encodeResponse(rw, http.StatusOK, resp); err != nil {
+		log.Logger.WithError(err).Error()
+	}
+}
+
+func (s *Server) taskStatusReport(rw http.ResponseWriter, r *http.Request) {
+	reader := r.Body
+	request := &types.TaskStatusReportRequest{}
+	if err := json.NewDecoder(reader).Decode(request); err != nil {
+		log.Logger.WithError(err).Error()
+	}
+	resp := &types.TaskStatusReportResponse{}
+	specifier := request.TaskSpecifier
+	if len(specifier) > 10 {
+		specifier = specifier[:10]
+	}
+	log.Logger.WithFields(logrus.Fields{
+		"type":    "task-status-report",
+		"node-id": request.NodeID,
+		"task":    specifier,
+		"status":  request.Status,
+	}).Debug()
+	s.taskMutex.Lock()
+	defer s.taskMutex.Unlock()
+	if t, exists := s.tasks[request.TaskType][request.TaskSpecifier]; exists {
+		if t.nodeID == request.NodeID {
+			t.status = request.Status
+			resp.Result = types.ResponseTypeSucceeded
+		} else {
+			resp.Result = types.ResponseTypeFailed
+			resp.Msg = "unmatched node id"
+		}
+	} else {
+		resp.Result = types.ResponseTypeFailed
+		resp.Msg = "invalid task"
 	}
 	if err := encodeResponse(rw, http.StatusOK, resp); err != nil {
 		log.Logger.WithError(err).Error()
@@ -170,7 +242,7 @@ func (s *Server) lock(rw http.ResponseWriter, r *http.Request) {
 	s.lockMutex.Lock()
 	defer s.lockMutex.Unlock()
 	if s.lockNodeID == 0 {
-		resp.Result = types.LockSucceeded
+		resp.Result = types.ResponseTypeSucceeded
 		s.lockNodeID = request.NodeID
 		s.lockIndex++
 		go func(lockIndex uint64) {
@@ -183,7 +255,7 @@ func (s *Server) lock(rw http.ResponseWriter, r *http.Request) {
 			}
 		}(s.lockIndex)
 	} else {
-		resp.Result = types.LockFailed
+		resp.Result = types.ResponseTypeFailed
 		resp.OccupiedBy = s.lockNodeID
 	}
 	if err := encodeResponse(rw, http.StatusOK, resp); err != nil {
@@ -207,9 +279,9 @@ func (s *Server) unlock(rw http.ResponseWriter, r *http.Request) {
 	defer s.lockMutex.Unlock()
 	if request.NodeID == s.lockNodeID {
 		s.lockNodeID = 0
-		resp.Result = types.UnLockSucceeded
+		resp.Result = types.ResponseTypeSucceeded
 	} else {
-		resp.Result = types.UnLockFailed
+		resp.Result = types.ResponseTypeFailed
 		resp.Msg = "invalid unlock node id"
 	}
 	if err := encodeResponse(rw, http.StatusOK, resp); err != nil {
@@ -252,4 +324,6 @@ func (s *Server) initHandler() {
 	http.HandleFunc(urls.NodeRegisterPath, s.nodeRegister)
 	http.HandleFunc(urls.TaskRegisterPath, s.taskRegister)
 	http.HandleFunc(urls.UnLockPath, s.unlock)
+	http.HandleFunc(urls.TaskStatusPath, s.taskStatus)
+	http.HandleFunc(urls.TaskStatusReportPath, s.taskStatusReport)
 }

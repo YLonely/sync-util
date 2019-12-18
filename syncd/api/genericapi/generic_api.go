@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"time"
 
-
 	"github.com/YLonely/sync-util/api/types"
 	"github.com/YLonely/sync-util/supernode/urls"
 	"github.com/YLonely/sync-util/syncd/api"
@@ -53,6 +52,25 @@ func (g *genericAPI) TaskRegister(ctx context.Context, req *types.TaskRegisterRe
 	res := &types.TaskRegisterResponse{}
 	err := g.do(ctx, url, req, res)
 	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+func (g *genericAPI) TaskStatus(ctx context.Context, req *types.TaskStatusRequest) (*types.TaskStatusResponse, error) {
+	url := fmt.Sprintf(formatTemplate, g.nodeIP, g.nodePort, urls.TaskStatusPath)
+	res := &types.TaskStatusResponse{}
+	err := g.do(ctx, url, req, res)
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+func (g *genericAPI) TaskStatusReport(ctx context.Context, req *types.TaskStatusReportRequest) (*types.TaskStatusReportResponse, error) {
+	url := fmt.Sprintf(formatTemplate, g.nodeIP, g.nodePort, urls.TaskStatusReportPath)
+	res := &types.TaskStatusReportResponse{}
+	if err := g.do(ctx, url, req, res); err != nil {
 		return nil, err
 	}
 	return res, nil

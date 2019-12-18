@@ -7,7 +7,7 @@ import (
 type FlattenRepos map[digest.Digest]struct{}
 
 type RepositoryStore struct {
-	Repositories map[string]repository
+	Repositories map[string]repository `json:"Repositories,omitempty"`
 }
 
 type repository map[string]digest.Digest

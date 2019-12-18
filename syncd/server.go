@@ -70,7 +70,6 @@ const (
 	lockRetryInterval           = time.Second * 5
 	remoteDirCheckRetryInterval = time.Second * 5
 	syncLoopInterval            = time.Second * 30
-	syncLoopRetry               = 3
 
 	repositoryFileName = "repositories.json"
 )
@@ -86,7 +85,7 @@ func NewServer(c Config) (*Server, error) {
 	var err error
 	if len(c.SuperNodeIP) == 0 || len(c.SuperNodePort) == 0 {
 		s.supernode, err = fakeapi.NewSuperNodeAPI()
-		log.Logger.Warn("no super node ip or port provided, use fake api instead")
+		log.Logger.Warn("no super node ip or port provided, running in single-node mode")
 	} else {
 		s.supernode, err = genericapi.NewSuperNodeAPI(c.SuperNodeIP, c.SuperNodePort)
 	}
@@ -134,7 +133,8 @@ func (s *Server) Stop(ctx context.Context) error {
 	for {
 		running := false
 		for _, t := range s.tasks {
-			if t.Status() == task.StatusRunning {
+			if status, err := t.Status(ctx); err == nil && status == task.StatusRunning {
+				// just ignore the err, cause it means the task is handled by other node
 				running = true
 			}
 		}
@@ -173,11 +173,11 @@ func (s *Server) remoteDirInit(ctx context.Context) error {
 	}
 	if res.needSync {
 		s.log().Info("it seems that we should sync the remote dir")
-		t, err := s.newRegisteredTask(ctx, "remote-dir-build", types.DirStructureSync, nil)
+		t, err := s.newTask(ctx, "remote-dir-build", types.DirStructureSync, nil)
 		if err != nil {
 			return err
 		}
-		if t == nil {
+		if t.Remote() {
 			s.log().Info("someone else get the job to sync the remote dir, wait for it")
 			for {
 				time.Sleep(remoteDirCheckRetryInterval)
@@ -227,8 +227,8 @@ func (s *Server) remoteDirInit(ctx context.Context) error {
 
 func (s *Server) syncLoop(ctx context.Context) error {
 	var (
-		srcRepository      = &dockertypes.RepositoryStore{}
-		targetFlattenRepos = &dockertypes.FlattenRepos{}
+		srcRepository      *dockertypes.RepositoryStore
+		targetFlattenRepos *dockertypes.FlattenRepos
 		exit               bool
 	)
 
@@ -254,7 +254,9 @@ func (s *Server) syncLoop(ctx context.Context) error {
 	for {
 
 		if s.runningTransfer == nil {
-			//we only pick one runable image transfer to run
+			srcRepository = &dockertypes.RepositoryStore{}
+			targetFlattenRepos = &dockertypes.FlattenRepos{}
+			//we only pick one runnable image transfer to run
 			if err := readJSONFile(srcRepositoryFilePath, srcRepository); err != nil {
 				return err
 			}
@@ -294,22 +296,19 @@ func (s *Server) syncLoop(ctx context.Context) error {
 					}).Debug()
 				}
 				s.runningTransfer = &transfer{id: repo, tasks: tasks}
-				emptyTransfer := true
 				for _, t := range tasks {
 					if _, exists := s.tasks[t.Specifier()]; exists {
 						s.log().WithFields(logrus.Fields{
 							"image-id":  repo.Encoded()[:10],
 							"specifier": t.Specifier()[:10],
 						}).Debug("task already exists")
-						continue
+						//the task is the same, we don't do it again, but the repo which contains those
+						//tasks may be different, so we should let it succeed, especially in single-node mode
+						t.SetJob(func(ctx context.Context) error { return nil })
+					} else {
+						s.tasks[t.Specifier()] = t
 					}
-					s.tasks[t.Specifier()] = t
 					go t.Run(cctx)
-					emptyTransfer = false
-				}
-				if emptyTransfer {
-					s.runningTransfer = nil
-					continue
 				}
 				//well, find one, just break
 				break
@@ -319,26 +318,33 @@ func (s *Server) syncLoop(ctx context.Context) error {
 		// is this running transfer succeeded and should be added to repository file
 		// or it failed should be tagged as failedTransfer
 		if s.runningTransfer != nil {
-			succeeded := true
-			hasRetried := false
-			skip := false
+			var (
+				succeeded  = true
+				terminated = true
+				result     error
+			)
 			for _, t := range s.runningTransfer.tasks {
-				if t.Status() != task.StatusFinished || t.Result() != nil {
+				status, err := t.Status(cctx)
+				if err != nil {
+					status = task.StatusRunning
+					result = nil
+					s.log().WithField("specifier", t.Specifier()[:10]).WithError(err).Warn("failed to get the status")
+				} else if status == task.StatusFailed {
+					result = t.Result()
+				}
+				if status != task.StatusFailed && status != task.StatusFinished {
+					terminated = false
+				}
+				if status != task.StatusFinished {
 					succeeded = false
 				}
-				if t.Status() == task.StatusFinished && t.Result() != nil {
-					if s.runningTransfer.retry >= syncLoopRetry {
-						s.log().WithField("image-id", s.runningTransfer.id.Encoded()[:10]).Warnf("retry %v times, skip it", s.runningTransfer.retry)
-						skip = true
-						break
+				if status == task.StatusFailed {
+					if t.Remote() {
+						s.log().WithField("specifier", t.Specifier()[:10]).Warn("remote task failed")
+					} else {
+						s.log().WithField("specifier", t.Specifier()[:10]).WithError(result).Error()
 					}
-					s.log().WithField("specifier", t.Specifier()[:10]).WithError(t.Result()).Error("task failed, retry it")
-					hasRetried = true
-					go t.Run(cctx)
 				}
-			}
-			if hasRetried {
-				s.runningTransfer.retry++
 			}
 			if succeeded {
 				// this is not a good idea i think, cause it will influence the whole system
@@ -348,6 +354,7 @@ func (s *Server) syncLoop(ctx context.Context) error {
 				if err != nil {
 					return err
 				}
+				targetFlattenRepos = &dockertypes.FlattenRepos{}
 				if err = readJSONFile(s.targetRepositoryFilePath, targetFlattenRepos); err != nil {
 					return err
 				}
@@ -362,8 +369,16 @@ func (s *Server) syncLoop(ctx context.Context) error {
 				}
 				s.log().WithField("succeeded-image", s.runningTransfer.id.Encoded()[:10]).Debug()
 				s.runningTransfer = nil
-			}
-			if skip {
+			} else if terminated {
+				for _, t := range s.runningTransfer.tasks {
+					status, err := t.Status(cctx)
+					if err != nil {
+						panic(err)
+					}
+					if status == task.StatusFailed {
+						delete(s.tasks, t.Specifier())
+					}
+				}
 				s.runningTransfer = nil
 			}
 		}
@@ -409,9 +424,8 @@ func (s *Server) newImageTransferTasks(ctx context.Context, repo digest.Digest) 
 		t, err := s.newLayerTransferTask(ctx, id)
 		if err != nil {
 			return tasks, err
-		} else if t != nil {
-			tasks = append(tasks, t)
 		}
+		tasks = append(tasks, t)
 	}
 
 	return tasks, nil
@@ -440,7 +454,7 @@ func (s *Server) newLayerTransferTask(ctx context.Context, chainID digest.Digest
 		}
 		return nil
 	}
-	return s.newRegisteredTask(ctx, chainID.Encoded(), types.DefaultSync, layerTransferJob)
+	return s.newTask(ctx, chainID.Encoded(), types.DefaultSync, layerTransferJob)
 }
 
 type checkResult struct {
@@ -493,26 +507,8 @@ func (s *Server) nodeRegister(ctx context.Context) (uint, error) {
 	return res.NodeID, nil
 }
 
-func (s *Server) newRegisteredTask(ctx context.Context, specifier string, t types.SyncType, job task.JobType) (*task.Task, error) {
-	req := &types.TaskRegisterRequest{
-		NodeID:        s.nodeID,
-		TaskSpecifier: specifier,
-		Type:          t,
-	}
-	resp, err := s.supernode.TaskRegister(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.Result != types.RegisterSucceeded {
-		if resp.Result == types.RegisterAlreadyExist {
-			s.log().Debugf("task %v is running or finished by node %v", specifier[:10], resp.RunningBy)
-		} else {
-			s.log().Error(resp.Msg)
-		}
-		return nil, nil
-	}
-	res := task.NewTask(specifier, t, job)
-	return res, nil
+func (s *Server) newTask(ctx context.Context, specifier string, t types.SyncType, job task.JobType) (*task.Task, error) {
+	return task.NewTask(ctx, s.supernode, s.nodeID, specifier, t, job)
 }
 
 //lock is a blocking call
@@ -533,7 +529,7 @@ func (s *Server) lock(ctx context.Context) error {
 		if err != nil {
 			break
 		}
-		if res.Result == types.LockSucceeded {
+		if res.Result == types.ResponseTypeSucceeded {
 			return nil
 		}
 		s.log().Debugf("failed to get lock, lock is occupied by node %v", res.OccupiedBy)
@@ -555,7 +551,7 @@ func (s *Server) unLock(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if res.Result == types.UnLockFailed {
+	if res.Result == types.ResponseTypeFailed {
 		return errors.New(res.Msg)
 	}
 	return nil
