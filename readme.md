@@ -4,7 +4,7 @@
 
 ![structure](./img/structure.PNG)
 
-Sync-util is a tool to manage and coordinate a cluster of nodes to properly handle the transferring of the image data of Docker to the shared storage. It is mainly designed to work with the [docker-extra](https://github.com/kubesys/docker-ext) project which uses the shared storage to speed up the creation of containers.
+Sync-util is a tool to manage and coordinate a cluster of nodes to properly handle the transferring of the image data of Docker to the shared storage. It is mainly designed to work with the [docker-extra](https://github.com/YLonely/docker) project which uses the shared storage to speed up the creation of containers.
 
 Sync-util consists of two components:
 
